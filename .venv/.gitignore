@@ -1,0 +1,50 @@
+# .gitignore
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+ENV/
+# *.env # Typically don't commit .env template but EXCLUDE actual .env file below
+
+# Secrets file !!! IMPORTANT !!!
+.env
+
+# Temporary and Log files
+temp/
+logs/
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+*.cache
+*.bak
+*.swp
+*.swo
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.tar.gz
+*.whl
+
+# Test results / coverage
+htmlcov/
+.coverage
+pytest_cache/
+.pytest_cache/
