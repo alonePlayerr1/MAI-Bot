@@ -1,40 +1,66 @@
 # main.py
-import telebot
+import asyncio
 import logging
-import config # Use config directly
-from app import utils
-from app import telegram_handler # Import the handlers module
+import sys
+
+# --- Aiogram Imports ---
+from aiogram import Bot, Dispatcher
+# ---> Добавляем импорт DefaultBotProperties <---
+from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.storage.memory import MemoryStorage
+
+# --- Project Imports ---
+import config
+from app import telegram_handler_aiogram
+
+async def main():
+    # Настройка логирования
+    config.setup_logging_aiogram()
+    logging.info("="*20 + " Starting MAI Bot (aiogram)... " + "="*20)
+
+    # Проверка токена
+    if not config.TELEGRAM_BOT_TOKEN:
+        logging.critical("Telegram Bot Token is missing in .env file. Exiting.")
+        sys.exit(1)
+
+    # Инициализация бота и диспетчера
+    storage = MemoryStorage()
+
+    # ---> ИЗМЕНЕННАЯ СТРОКА ИНИЦИАЛИЗАЦИИ BOT <---
+    # Устанавливаем parse_mode через DefaultBotProperties
+    bot = Bot(
+        token=config.TELEGRAM_BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode="HTML") # Используем HTML по умолчанию
+    )
+    # ---> КОНЕЦ ИЗМЕНЕНИЯ <---
+
+    dp = Dispatcher(storage=storage)
+
+    # Регистрация обработчиков (роутеров)
+    await telegram_handler_aiogram.register_aiogram_handlers(dp, bot)
+
+    # Удаление вебхука перед запуском поллинга
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Webhook deleted successfully or was not set.")
+    except Exception as e:
+        logging.warning(f"Could not delete webhook: {e}. Skipping.")
+
+    # Запуск поллинга
+    logging.info("Starting polling...")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        logging.info("Polling stopped. Closing bot session...")
+        await bot.session.close()
+        logging.info("Bot session closed.")
+
 
 if __name__ == "__main__":
-    # Setup logging first - reads config internally
-    utils.setup_logging()
-    logging.info("Starting MAI Bot...")
-
-    # Validate config essentials needed for startup
-    if not config.TELEGRAM_BOT_TOKEN:
-         logging.critical("Telegram Bot Token is missing. Check .env file. Exiting.")
-         exit(1)
-    # Credentials file existence check happens in utils.setup_logging() via config
-
-    # Initialize Bot
     try:
-        bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN)
-        bot_info = bot.get_me()
-        logging.info(f"TeleBot instance created for bot: {bot_info.username} (ID: {bot_info.id})")
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Bot stopped manually!")
     except Exception as e:
-        logging.critical(f"Failed to initialize TeleBot: {e}", exc_info=True)
-        exit(1)
-
-
-    # Register Handlers from the dedicated module
-    telegram_handler.register_handlers(bot)
-
-    # Start Polling
-    logging.info("Bot polling started...")
-    try:
-        # Use non_stop=True for continuous running, interval for polling frequency
-        # Consider adding exception handling within polling loop if needed
-        bot.polling(non_stop=True, interval=1, timeout=60)
-    except Exception as e:
-        logging.critical(f"Bot polling failed critically: {e}", exc_info=True)
-        # Consider adding restart logic here if needed or notifying admin
+        logging.critical(f"Bot failed critically outside main loop: {e}", exc_info=True)
+        sys.exit(1)

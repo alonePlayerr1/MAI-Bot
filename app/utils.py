@@ -1,35 +1,16 @@
 # app/utils.py
 import logging
 import os
-import sys
 from datetime import datetime
-import config # Import the config module directly
+import config # Импортируем для METADATA_SEPARATOR
 
-def setup_logging():
-    """Configures logging for the application."""
-    # Ensure log directory exists (redundant if config does it, but safe)
-    os.makedirs(config.LOG_FOLDER, exist_ok=True)
+# Функция setup_logging() удалена, используется setup_logging_aiogram() из config.py
 
-    logging.basicConfig(
-        level=config.LOG_LEVEL,
-        format='%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(lineno)d] - %(message)s', # Added module/line info
-        handlers=[
-            logging.FileHandler(config.LOG_FILE),
-            logging.StreamHandler(sys.stdout) # Also print logs to console
-        ]
-    )
-    # Quieten noisy libraries
-    logging.getLogger('google').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('telegram').setLevel(logging.INFO) # Adjust if needed for telebot
-
-    logging.info("="*20 + " Logging setup complete " + "="*20)
-    # Now check credentials file existence after logger is ready
-    config.check_credentials_file()
-
-
-def generate_audio_filename(metadata: dict, original_filename: str | None) -> str:
-    """Generates a structured filename for the audio file."""
+def generate_audio_filename(metadata: dict, original_filename: str | None, output_extension: str = ".ogg") -> str:
+    """
+    Generates a structured filename for the audio file.
+    Uses output_extension for the final file extension.
+    """
     try:
         # Ensure all keys exist, provide defaults if necessary
         discipline = metadata.get('discipline', 'UnknownDiscipline')
@@ -37,37 +18,41 @@ def generate_audio_filename(metadata: dict, original_filename: str | None) -> st
         date_str = metadata.get('lection_date', 'UnknownDate')
         time_str = metadata.get('lection_time', 'UnknownTime')
 
-        # Basic sanitization (replace spaces and potentially problematic chars)
+        # Базовая очистка имен (замена пробелов и потенциально проблемных символов)
         safe_discipline = discipline.replace(" ", "_").replace("/", "-").replace("\\", "-")
         safe_teacher = teacher.replace(" ", "_").replace("/", "-").replace("\\", "-")
 
-        if original_filename:
-             base_name, extension = os.path.splitext(original_filename)
-             if not extension:
-                 extension = '.oga' # Default extension if Telegram doesn't provide one or filename missing
-        else:
-             extension = '.oga' # Default if original filename is None
-
-        # Format time string consistently for filename
+        # Форматируем время для имени файла
         safe_time_str = time_str.replace(":", "-")
 
-        filename = config.METADATA_SEPARATOR.join([
+        # Убеждаемся, что расширение начинается с точки
+        if not output_extension.startswith('.'):
+            output_extension = '.' + output_extension
+
+        # Собираем базовое имя файла без расширения
+        base_filename = config.METADATA_SEPARATOR.join([
             safe_discipline,
             safe_teacher,
-            date_str, # Date format should be filename-safe already
+            date_str, # Формат даты уже должен быть безопасным
             safe_time_str,
-            f"original{extension}" # Keep original extension
+            "audio" # Общий идентификатор, оригинальное расширение уже не так важно
         ])
-        # Limit filename length if necessary (though unlikely with this structure)
-        max_len = 200
+
+        filename = base_filename + output_extension
+
+        # Ограничиваем длину имени файла, если нужно (маловероятно с этой структурой)
+        max_len = 200 # Максимальная длина имени файла
         if len(filename) > max_len:
-             filename = filename[:max_len-len(extension)] + extension
+             filename = filename[:max_len - len(output_extension)] + output_extension
              logging.warning(f"Generated filename was truncated: {filename}")
 
         return filename
     except Exception as e:
         logging.error(f"Error generating filename: {e}", exc_info=True)
-        # Fallback filename
+        # Запасное имя файла
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_original = original_filename.replace(" ", "_").replace("/", "-").replace("\\", "-") if original_filename else "audio.oga"
-        return f"fallback_{timestamp}_{safe_original[-50:]}" # Limit original name part in fallback
+        safe_original = original_filename.replace(" ", "_").replace("/", "-").replace("\\", "-") if original_filename else "audio"
+        fallback_ext = output_extension if output_extension else ".ogg"
+        return f"fallback_{timestamp}_{safe_original[-50:]}{fallback_ext}" # Ограничиваем часть оригинального имени
+
+# Можно добавить другие общие утилиты сюда в будущем
