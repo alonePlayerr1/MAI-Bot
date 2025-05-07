@@ -262,12 +262,14 @@ async def handle_drive_link(message: Message, state: FSMContext, bot: Bot):
         logging.info(f"S2T завершено для chat_id {chat_id}. Длина транскрипта: {len(transcript)}")
         await message.answer("✅ Распознавание речи успешно завершено!")
 
-        # --- 6. Анализ текста (Заглушка) ---
         # --- 6. Анализ текста ---
         await message.answer("📊 Анализирую текст...")  # Обновил сообщение
-        logging.info(f"Запуск анализа текста для chat_id {chat_id}")
-        # Вызываем обновленную функцию analyze
-        analysis_results = await asyncio.to_thread(text_analyzer.analyze, transcript)
+        current_user_data = await state.get_data()  # Получаем актуальные данные FSM
+        discipline_for_nlp = current_user_data.get('discipline', 'Лекция')  # Берем дисциплину из user_data
+
+        logging.info(f"Запуск анализа текста для chat_id {chat_id}, дисциплина: {discipline_for_nlp}")
+        # ---> Передаем discipline_for_nlp <---
+        analysis_results = await text_analyzer.analyze(transcript, discipline_for_nlp)
         logging.info(f"Результат анализа для chat_id {chat_id}: {analysis_results}")
         await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
 
@@ -430,10 +432,15 @@ async def handle_dev_transcript_txt(message: Message, state: FSMContext, bot: Bo
         await message.answer("⚙️ DEV: Запускаю обработку транскрипта...")
 
         # --- 6. Анализ текста ---
-        await message.answer("📊 Анализирую текст (заглушка)...")
-        logging.info(f"DEV MODE: Запуск анализа текста для chat_id {chat_id}")
-        analysis_results = await asyncio.to_thread(text_analyzer.analyze, transcript)
-        logging.info(f"DEV MODE: Результат анализа (заглушка): {analysis_results}")
+        # --- 6. Анализ текста ---
+        await message.answer("📊 Запускаю анализ текста...")  # Обновил сообщение
+        current_user_data = await state.get_data()  # Получаем актуальные данные FSM (метаданные из dev-режима)
+        discipline_for_nlp = current_user_data.get('discipline', 'Лекция DEV')  # Берем дисциплину
+
+        logging.info(f"DEV MODE: Запуск анализа текста для chat_id {chat_id}, дисциплина: {discipline_for_nlp}")
+        # ---> ПРАВИЛЬНЫЙ ВЫЗОВ <---
+        analysis_results = await text_analyzer.analyze(transcript, discipline_for_nlp)
+        logging.info(f"DEV MODE: Результат анализа для chat_id {chat_id}: {analysis_results}")
         await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
 
         # --- 7. Генерация документа ---
