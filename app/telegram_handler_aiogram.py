@@ -200,7 +200,12 @@ async def handle_datetime(message: Message, state: FSMContext):
 @registration_router.message(StateFilter(LectureRegistration.waiting_confirmation), F.text.in_(["Да", "Нет"]))
 async def handle_confirmation(message: Message, state: FSMContext):
     if message.text == "Да":
-        await message.answer("✅ Данные подтверждены. Теперь отправьте ссылку Google Drive.", reply_markup=ReplyKeyboardRemove())
+        link_instruction_message = (
+            "✅ Данные подтверждены. Теперь отправьте ссылку Google Drive. \n\n"
+            "Если Вы не знаете как загрузить файл на Google Drive и поделиться ссылкой на него, пожалуйста, посмотрите эту инструкцию: \n"
+            "https://docs.google.com/document/d/107HVvgmohFvQ3TG8fY7Wo9XEzbrkJJJR/edit?usp=sharing&ouid=100211410150820151680&rtpof=true&sd=true"
+            )
+        await message.answer(link_instruction_message, reply_markup=ReplyKeyboardRemove())
         await state.set_state(LectureRegistration.waiting_drive_link)
     else:
         await message.answer("Какие данные вы хотите исправить?", reply_markup=correction_options_keyboard)
