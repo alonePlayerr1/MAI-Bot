@@ -1,0 +1,587 @@
+import asyncio
+import logging
+import os
+import re
+import tempfile
+from datetime import datetime
+
+from aiogram import Bot, Dispatcher, Router, F, types
+from aiogram.filters import CommandStart, Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message, ReplyKeyboardRemove, FSInputFile, Document, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.enums import ChatAction
+
+import config
+from config import LectureRegistration, DevProcessing
+from app import utils
+from app import drive_handler
+from app import cloud_storage
+from app import audio_processor
+from app import text_analyzer
+from app import doc_generator
+
+from pydub import AudioSegment
+from pydub.exceptions import CouldntDecodeError
+
+# --- Создаем Роутеры ---
+common_router = Router(name="common_commands")
+registration_router = Router(name="lecture_registration_fsm")
+dev_router = Router(name="developer_tools")
+
+# --- Клавиатуры ---
+confirmation_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Да"), KeyboardButton(text="Нет")],
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
+correction_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Да"), KeyboardButton(text="Нет")],
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
+# --- Общие команды ---
+@common_router.message(CommandStart())
+async def handle_start(message: Message, state: FSMContext):
+    chat_id = message.chat.id
+    logging.info(f"/start from {chat_id}")
+    await state.clear()
+    await message.answer("Привет! Давайте зарегистрируем вашу лекцию.", reply_markup=ReplyKeyboardRemove())
+    await message.answer("1. Напишите название дисциплины:")
+    await state.set_state(LectureRegistration.waiting_discipline)
+
+@common_router.message(Command("reset"))
+async def handle_reset(message: Message, state: FSMContext):
+    chat_id = message.chat.id
+    current_state = await state.get_state()
+    logging.info(f"/reset from {chat_id}. State: {current_state}")
+    await state.clear()
+    await message.answer("🔄 Все данные сброшены. Начните заново с /start.", reply_markup=ReplyKeyboardRemove())
+
+@common_router.message(Command("retry"))
+async def handle_retry(message: Message, state: FSMContext):
+    chat_id = message.chat.id
+    current_state = await state.get_state()
+    logging.info(f"/retry from {chat_id}. State: {current_state}")
+    
+    if current_state in [
+        LectureRegistration.waiting_discipline,
+        LectureRegistration.waiting_teacher,
+        LectureRegistration.waiting_datetime,
+        LectureRegistration.waiting_drive_link,
+        LectureRegistration.waiting_confirmation,
+        LectureRegistration.waiting_confirmation_correction
+    ]:
+        await state.set_state(LectureRegistration.waiting_discipline)
+        await message.answer("🔄 Возвращаю к началу ввода данных.\n1. Введите название дисциплины:", reply_markup=ReplyKeyboardRemove())
+    elif current_state in [
+        DevProcessing.waiting_dev_discipline,
+        DevProcessing.waiting_dev_teacher,
+        DevProcessing.waiting_dev_datetime,
+        DevProcessing.waiting_transcript_txt
+    ]:
+        await state.set_state(DevProcessing.waiting_dev_discipline)
+        await message.answer("🔄 DEV: Возвращаю к началу ввода данных.\n1. Введите название дисциплины:", reply_markup=ReplyKeyboardRemove())
+    else:
+        await message.answer("ℹ️ Нет активного процесса для перезапуска. Используйте /start.", reply_markup=ReplyKeyboardRemove())
+
+@common_router.message(Command("help"))
+async def handle_help(message: Message):
+    help_text = (
+        "📚 Помощь по боту:\n\n"
+        "<b>Основные команды:</b>\n"
+        "/start - начать регистрацию лекции\n"
+        "/reset - сбросить все данные\n"
+        "/retry - начать ввод данных заново\n"
+        "/help - эта справка\n\n"
+        "<b>В любом месте диалога вы можете:</b>\n"
+        "• Использовать /reset для полного сброса\n"
+        "• Использовать /retry чтобы начать ввод заново\n\n"
+        "<b>Форматы данных:</b>\n"
+        "• ФИО преподавателя: ИвановИИ (без пробелов)\n"
+        "• Дата/время: ЧЧ:ММ-ДД.ММ.ГГГГ"
+    )
+    await message.reply(help_text, reply_markup=ReplyKeyboardRemove())
+
+# --- Основной режим (регистрация лекции) ---
+@registration_router.message(StateFilter(LectureRegistration.waiting_discipline), F.text)
+async def handle_discipline(message: Message, state: FSMContext):
+    if message.text.startswith('/'):
+        return
+    
+    discipline_name = message.text.strip()
+    
+    if not discipline_name:
+        await message.answer("Название не может быть пустым.")
+        return
+    
+    logging.info(f"Discipline '{discipline_name}' received")
+    await state.update_data(discipline=discipline_name)
+    await message.answer(f"✅ Отлично! Дисциплина: '{discipline_name}'.\n2. Введите ФИО преподавателя (например: ИвановИИ):")
+    await state.set_state(LectureRegistration.waiting_teacher)
+
+@registration_router.message(StateFilter(LectureRegistration.waiting_teacher), F.text)
+async def handle_teacher_name(message: Message, state: FSMContext):
+    if message.text.startswith('/'):
+        return
+    
+    teacher_name = message.text.strip()
+    
+    if not teacher_name:
+        await message.answer("Имя не может быть пустым.")
+        return
+        
+    if ' ' in teacher_name:
+        await message.answer("Ошибка: вводите ФИО без пробелов (например: ИвановИИ).")
+        return
+    
+    logging.info(f"Teacher '{teacher_name}' received")
+    await state.update_data(teacher_name=teacher_name)
+    await message.answer(f"✅ Принято! Преподаватель: '{teacher_name}'.\n3. Введите дату и время (ЧЧ:ММ-ДД.ММ.ГГГГ):")
+    await state.set_state(LectureRegistration.waiting_datetime)
+
+@registration_router.message(StateFilter(LectureRegistration.waiting_datetime), F.text)
+async def handle_datetime(message: Message, state: FSMContext):
+    datetime_input = message.text.strip()
+    if not datetime_input:
+        await message.answer("Дата/время не могут быть пустыми.", reply_markup=ReplyKeyboardRemove())
+        return
+    
+    try:
+        time_str, date_str = datetime_input.split(config.DATETIME_SPLIT_CHAR)
+        datetime.strptime(time_str, config.TIME_FORMAT)
+        datetime.strptime(date_str, config.DATE_FORMAT)
+        
+        await state.update_data(lection_time=time_str, lection_date=date_str)
+        logging.info(f"DateTime '{datetime_input}' received")
+        
+        # Получаем все введенные данные
+        user_data = await state.get_data()
+        
+        # Формируем сообщение с подтверждением
+        confirmation_message = (
+            "📋 Пожалуйста, подтвердите введенные данные:\n\n"
+            f"• Дисциплина: {user_data.get('discipline', 'не указано')}\n"
+            f"• Преподаватель: {user_data.get('teacher_name', 'не указано')}\n"
+            f"• Дата/время: {time_str} {date_str}\n\n"
+            "Все верно?"
+        )
+        
+        await message.answer(confirmation_message, reply_markup=confirmation_keyboard)
+        await state.set_state(LectureRegistration.waiting_confirmation)
+        
+    except (ValueError, TypeError):
+        await message.answer(f"Ошибка формата: нужен ЧЧ:ММ{config.DATETIME_SPLIT_CHAR}ДД.ММ.ГГГГ.", reply_markup=ReplyKeyboardRemove())
+
+@registration_router.message(StateFilter(LectureRegistration.waiting_confirmation), F.text.in_(["Да", "Нет"]))
+async def handle_confirmation(message: Message, state: FSMContext, bot: Bot):
+    if message.text == "Да":
+        await message.answer("✅ Данные подтверждены. Теперь отправьте ссылку Google Drive.", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(LectureRegistration.waiting_drive_link)
+    else:
+        await message.answer("Вы хотите исправить введенные данные?", reply_markup=correction_keyboard)
+        await state.set_state(LectureRegistration.waiting_confirmation_correction)
+
+@registration_router.message(StateFilter(LectureRegistration.waiting_confirmation_correction), F.text.in_(["Да", "Нет"]))
+async def handle_confirmation_correction(message: Message, state: FSMContext):
+    if message.text == "Да":
+        await handle_retry(message, state)
+    else:
+        user_data = await state.get_data()
+        confirmation_message = (
+            "📋 Пожалуйста, подтвердите введенные данные:\n\n"
+            f"• Дисциплина: {user_data.get('discipline', 'не указано')}\n"
+            f"• Преподаватель: {user_data.get('teacher_name', 'не указано')}\n"
+            f"• Дата/время: {user_data.get('lection_time', 'не указано')} {user_data.get('lection_date', 'не указано')}\n\n"
+            "Все верно?"
+        )
+        await message.answer(confirmation_message, reply_markup=confirmation_keyboard)
+        await state.set_state(LectureRegistration.waiting_confirmation)
+
+@registration_router.message(StateFilter(LectureRegistration.waiting_drive_link), F.text)
+async def handle_drive_link(message: Message, state: FSMContext, bot: Bot):
+    chat_id = message.chat.id
+    drive_link = message.text.strip() if message.text else None
+    user_data = await state.get_data()
+
+    downloaded_drive_file_path = None
+    converted_temp_file_path = None
+    generated_doc_path = None
+    detected_sample_rate = 0
+    structured_filename = None
+
+    if not drive_link or not re.search(r'drive.google.com/(file/d/|open\?id=|/d/)', drive_link):
+        logging.warning(f"Invalid Google Drive link from chat_id {chat_id}: {drive_link}")
+        await message.answer("❌ Пожалуйста, отправьте корректную ссылку на файл в Google Drive.")
+        return
+
+    logging.info(f"Google Drive link received from chat_id {chat_id}: {drive_link}")
+    await message.answer(f"✅ Ссылка получена!")
+
+    try:
+        await message.answer(f"📥 Начинаю скачивание файла из Google Drive...")
+        await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
+        logging.info(f"Starting Drive download for chat_id {chat_id}")
+
+        downloaded_drive_file_path = await asyncio.to_thread(
+            drive_handler.download_file_from_drive, drive_link
+        )
+
+        if not downloaded_drive_file_path:
+            logging.error(f"Failed to download file from Google Drive for chat_id {chat_id}")
+            await message.answer("❌ Не удалось скачать файл из Google Drive. Проверьте ссылку и права доступа.")
+            await state.clear()
+            return
+
+        logging.info(f"File downloaded from Drive to {downloaded_drive_file_path} for chat_id {chat_id}")
+        await message.answer("👍 Файл из Google Drive успешно скачан.")
+        await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
+
+        await message.answer("⚙️ Готовлю аудиофайл (конвертирую в формат Opus)...")
+        logging.info(f"Starting audio processing for chat_id {chat_id}")
+        output_extension = ".ogg"
+        structured_filename = utils.generate_audio_filename(user_data, None, output_extension)
+
+        def process_audio_sync(input_path, output_dir, filename):
+            temp_path_conv = None
+            TARGET_SAMPLE_RATE = 16000
+            try:
+                audio = AudioSegment.from_file(input_path)
+                original_rate = audio.frame_rate
+                logging.info(f"Audio loaded: {audio.duration_seconds:.2f} sec, Rate: {original_rate} Hz, Channels: {audio.channels}")
+
+                if audio.channels > 1:
+                    logging.info("Converting to mono...")
+                    audio = audio.set_channels(1)
+
+                if original_rate != TARGET_SAMPLE_RATE:
+                    logging.info(f"Resampling from {original_rate} Hz to {TARGET_SAMPLE_RATE} Hz...")
+                    try:
+                        audio = audio.set_frame_rate(TARGET_SAMPLE_RATE)
+                        logging.info(f"Successfully resampled to {audio.frame_rate} Hz.")
+                    except Exception as resample_e:
+                        logging.error(f"Resampling error: {resample_e}", exc_info=True)
+                        raise ValueError(f"Failed to resample to {TARGET_SAMPLE_RATE} Hz") from resample_e
+
+                final_rate = audio.frame_rate
+                if final_rate <= 0:
+                    raise ValueError(f"Invalid final sample rate ({final_rate} Hz)")
+
+                with tempfile.NamedTemporaryFile(mode='wb', suffix=output_extension, dir=output_dir, delete=False) as conv_temp_f:
+                    temp_path_conv = conv_temp_f.name
+                    logging.info(f"Exporting to OGG Opus at {temp_path_conv} with rate {final_rate} Hz")
+                    audio.export(temp_path_conv, format="ogg", codec="libopus", bitrate="48k")
+
+                logging.info(f"Audio successfully converted: {temp_path_conv}")
+                return temp_path_conv, final_rate
+            except CouldntDecodeError as e:
+                logging.error(f"Pydub decode error: {input_path}. {e}", exc_info=True)
+                raise
+            except Exception as e:
+                logging.error(f"Audio processing error {input_path}: {e}", exc_info=True)
+                if temp_path_conv and os.path.exists(temp_path_conv):
+                    try: os.remove(temp_path_conv)
+                    except OSError: pass
+                raise
+
+        try:
+            converted_temp_file_path, detected_sample_rate = await asyncio.to_thread(
+                process_audio_sync, downloaded_drive_file_path, config.TEMP_FOLDER, structured_filename
+            )
+            logging.info(f"Final sample rate: {detected_sample_rate} Hz")
+        except ValueError as ve:
+            logging.error(f"Sample rate error: {ve}", exc_info=True)
+            await message.answer("❌ Не удалось подготовить аудиофайл (проблема с частотой дискретизации).")
+            await state.clear()
+            return
+        except CouldntDecodeError:
+            await message.answer("❌ Не удалось обработать скачанный аудиофайл (ошибка декодирования).")
+            await state.clear()
+            return
+        except Exception as proc_e:
+            logging.error(f"Unexpected audio processing error: {proc_e}", exc_info=True)
+            await message.answer("❌ Произошла ошибка во время подготовки аудиофайла.")
+            await state.clear()
+            return
+
+        if not detected_sample_rate or detected_sample_rate <= 0:
+            logging.error(f"Invalid final sample rate ({detected_sample_rate}). Aborting.")
+            await message.answer("❌ Ошибка: Не удалось получить корректную частоту дискретизации аудио.")
+            await state.clear()
+            return
+
+        await message.answer(f"👍 Аудио подготовлено (формат .ogg, частота: {detected_sample_rate} Гц).")
+        await bot.send_chat_action(chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+
+        await message.answer("☁️⬆️ Загружаю файл в облачное хранилище...")
+        logging.info(f"Starting GCS upload for chat_id {chat_id}: {structured_filename}")
+        gcs_uri = await asyncio.to_thread(
+            cloud_storage.upload_to_gcs, converted_temp_file_path, structured_filename
+        )
+        if not gcs_uri:
+            await message.answer("❌ Ошибка при загрузке файла в облачное хранилище.")
+            await state.clear()
+            return
+        logging.info(f"File uploaded to {gcs_uri} for chat_id {chat_id}")
+        await message.answer(f"👍 Файл успешно загружен в облако.")
+        await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
+
+        await message.answer("🧠 Запускаю распознавание речи (это может занять длительное время)...")
+        logging.info(f"Starting S2T for chat_id {chat_id} with rate {detected_sample_rate} Hz")
+        transcript = await asyncio.to_thread(
+            audio_processor.transcribe_audio_gcs, gcs_uri, detected_sample_rate
+        )
+
+        if transcript is None:
+            await message.answer("❌ Ошибка во время распознавания речи.")
+            await state.clear()
+            return
+
+        logging.info(f"S2T completed for chat_id {chat_id}. Transcript length: {len(transcript)}")
+        await message.answer("✅ Распознавание речи успешно завершено!")
+
+        await message.answer("📊 Анализирую текст...")
+        current_user_data = await state.get_data()
+        discipline_for_nlp = current_user_data.get('discipline', 'Лекция')
+
+        logging.info(f"Starting text analysis for chat_id {chat_id}, discipline: {discipline_for_nlp}")
+        analysis_results = await text_analyzer.analyze(transcript, discipline_for_nlp)
+        logging.info(f"Analysis results for chat_id {chat_id}: {analysis_results}")
+        await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
+
+        await message.answer("✍️ Создаю отчет...")
+        logging.info(f"Starting document generation for chat_id {chat_id}")
+        user_data_with_transcript = {**user_data, "transcript": transcript}
+        generated_doc_paths = await asyncio.to_thread(
+            doc_generator.generate, analysis_results, user_data_with_transcript
+        )
+        
+        if generated_doc_paths:
+            generated_doc_path = generated_doc_paths[0]
+            logging.info(f"Document generated: {generated_doc_path}")
+        else:
+            logging.error(f"Document generation failed for chat_id {chat_id}")
+            await message.answer("⚠️ Не удалось создать файл отчета.")
+        
+        await bot.send_chat_action(chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+        await message.answer("✨ Обработка полностью завершена!")
+
+        if generated_doc_path and os.path.exists(generated_doc_path):
+            try:
+                doc_to_send = FSInputFile(path=generated_doc_path, filename=os.path.basename(generated_doc_path))
+                await message.answer_document(document=doc_to_send, caption="Ваш отчет готов.")
+                logging.info(f"Generated document {generated_doc_path} sent to chat_id {chat_id}")
+            except Exception as send_doc_e:
+                logging.error(f"Error sending document {generated_doc_path}: {send_doc_e}", exc_info=True)
+                await message.answer("⚠️ Не удалось отправить файл с отчетом.")
+        elif not generated_doc_paths:
+            pass
+        else:
+            logging.error(f"Generated report file not found: {generated_doc_path}")
+            await message.answer("⚠️ Не удалось найти сгенерированный файл отчета.")
+
+        logging.info(f"Full processing cycle completed for chat_id {chat_id}")
+        await state.clear()
+
+    except Exception as e:
+        logging.error(f"CRITICAL ERROR in handle_drive_link for chat_id {chat_id}: {e}", exc_info=True)
+        await message.answer("❌ Произошла непредвиденная ошибка. Пожалуйста, попробуйте снова.")
+        await state.clear()
+    finally:
+        async def cleanup_file(f_path):
+            if f_path and os.path.exists(f_path):
+                try:
+                    await asyncio.to_thread(os.remove, f_path)
+                    logging.info(f"Cleaned up temp file: {f_path}")
+                except OSError as e:
+                    logging.error(f"Error deleting temp file {f_path}: {e}", exc_info=True)
+        
+        await asyncio.gather(
+            cleanup_file(downloaded_drive_file_path),
+            cleanup_file(converted_temp_file_path),
+            cleanup_file(generated_doc_path)
+        )
+
+@registration_router.message(StateFilter(LectureRegistration.waiting_drive_link))
+async def handle_drive_link_incorrect_type(message: Message):
+    await message.answer("Пожалуйста, отправьте ссылку на Google Drive текстом.")
+
+# --- Режим разработчика ---
+@dev_router.message(Command("dev_process_txt"))
+async def handle_dev_start(message: Message, state: FSMContext):
+    chat_id = message.chat.id
+    logging.info(f"DEV MODE: Received /dev_process_txt from chat_id {chat_id}")
+    await state.clear()
+    await message.answer("⚙️ Режим разработчика: Обработка TXT.\n1. Введите название дисциплины:", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(DevProcessing.waiting_dev_discipline)
+
+@dev_router.message(StateFilter(DevProcessing.waiting_dev_discipline), F.text)
+async def handle_dev_discipline(message: Message, state: FSMContext):
+    discipline_name = message.text.strip()
+    if not discipline_name:
+        await message.answer("Название не может быть пустым.")
+        return
+    logging.info(f"DEV MODE: Discipline '{discipline_name}' received.")
+    await state.update_data(discipline=discipline_name)
+    await message.answer(f"DEV: Дисциплина '{discipline_name}'.\n2. Введите ФИО преподавателя (слитно, например: ИвановИИ):")
+    await state.set_state(DevProcessing.waiting_dev_teacher)
+
+@dev_router.message(StateFilter(DevProcessing.waiting_dev_teacher), F.text)
+async def handle_dev_teacher(message: Message, state: FSMContext):
+    teacher_name = message.text.strip()
+    if not teacher_name:
+        await message.answer("Имя не может быть пустым.")
+        return
+    if ' ' in teacher_name:
+        await message.answer("DEV: Ошибка: без пробелов (ИвановИИ).")
+        return
+    logging.info(f"DEV MODE: Teacher '{teacher_name}' received.")
+    await state.update_data(teacher_name=teacher_name)
+    await message.answer(f"DEV: Преподаватель '{teacher_name}'.\n3. Введите дату и время (ЧЧ:ММ-ДД.ММ.ГГГГ):")
+    await state.set_state(DevProcessing.waiting_dev_datetime)
+
+@dev_router.message(StateFilter(DevProcessing.waiting_dev_datetime), F.text)
+async def handle_dev_datetime_dev(message: Message, state: FSMContext):
+    datetime_input = message.text.strip()
+    if not datetime_input:
+        await message.answer("Дата/время не могут быть пустыми.")
+        return
+    try:
+        time_str, date_str = datetime_input.split(config.DATETIME_SPLIT_CHAR)
+        datetime.strptime(time_str, config.TIME_FORMAT)
+        datetime.strptime(date_str, config.DATE_FORMAT)
+        logging.info(f"DEV MODE: DateTime '{datetime_input}' received.")
+        await state.update_data(lection_time=time_str, lection_date=date_str)
+        await message.answer("✅ DEV: Метаданные собраны.\n4. Теперь отправьте файл <b>.txt</b> с готовым транскриптом лекции.")
+        await state.set_state(DevProcessing.waiting_transcript_txt)
+    except (ValueError, TypeError):
+        await message.answer(f"DEV: Ошибка формата: нужен ЧЧ:ММ{config.DATETIME_SPLIT_CHAR}ДД.ММ.ГГГГ.")
+
+@dev_router.message(StateFilter(DevProcessing.waiting_transcript_txt), F.document)
+async def handle_dev_transcript_txt(message: Message, state: FSMContext, bot: Bot):
+    chat_id = message.chat.id
+    document = message.document
+    temp_txt_path = None
+    generated_doc_path = None
+    user_data = await state.get_data()
+
+    if not document.file_name or not document.file_name.lower().endswith('.txt') or document.mime_type != 'text/plain':
+        await message.answer("❌ Пожалуйста, отправьте файл именно в формате <b>.txt</b>.")
+        return
+
+    await message.answer(f"✅ DEV: Файл {document.file_name} получен ({document.file_size} байт). Читаю транскрипт...")
+    await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
+
+    try:
+        with tempfile.NamedTemporaryFile(mode='wb', suffix=".txt", dir=config.TEMP_FOLDER, delete=False) as temp_f:
+            temp_txt_path = temp_f.name
+            await bot.download(file=document.file_id, destination=temp_txt_path)
+            logging.info(f"DEV MODE: Transcript TXT downloaded to {temp_txt_path}")
+
+        with open(temp_txt_path, 'r', encoding='utf-8') as f:
+            transcript = f.read()
+
+        if not transcript or not transcript.strip():
+            logging.warning(f"DEV MODE: Uploaded TXT file {temp_txt_path} is empty.")
+            await message.answer("❌ Отправленный TXT файл пуст.")
+            await state.clear()
+            return
+
+        logging.info(f"DEV MODE: Transcript loaded from TXT. Length: {len(transcript)}")
+
+        await message.answer("⚙️ DEV: Запускаю обработку транскрипта...")
+        await message.answer("📊 Запускаю анализ текста...")
+        current_user_data = await state.get_data()
+        discipline_for_nlp = current_user_data.get('discipline', 'Лекция DEV')
+
+        logging.info(f"DEV MODE: Starting text analysis for chat_id {chat_id}, discipline: {discipline_for_nlp}")
+        analysis_results = await text_analyzer.analyze(transcript, discipline_for_nlp)
+        logging.info(f"DEV MODE: Analysis results for chat_id {chat_id}: {analysis_results}")
+        await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
+
+        await message.answer("✍️ Создаю отчет (заглушка)...")
+        logging.info(f"DEV MODE: Starting document generation for chat_id {chat_id}")
+        user_data_with_transcript = {**user_data, "transcript": transcript}
+        generated_doc_paths = await asyncio.to_thread(
+            doc_generator.generate, analysis_results, user_data_with_transcript
+        )
+        
+        if generated_doc_paths:
+            generated_doc_path = generated_doc_paths[0]
+            logging.info(f"DEV MODE: Document generated (stub): {generated_doc_path}")
+        else:
+            logging.error(f"DEV MODE: Document generation (stub) failed")
+            await message.answer("⚠️ Не удалось создать файл отчета (заглушка).")
+
+        await bot.send_chat_action(chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+        await message.answer("✨ DEV MODE: Обработка TXT завершена!")
+
+        if generated_doc_path and os.path.exists(generated_doc_path):
+            try:
+                doc_to_send = FSInputFile(path=generated_doc_path, filename=os.path.basename(generated_doc_path))
+                await message.answer_document(document=doc_to_send, caption="Ваш DEV отчет готов.")
+                logging.info(f"DEV MODE: Generated document {generated_doc_path} sent to chat_id {chat_id}")
+            except Exception as send_doc_e:
+                logging.error(f"DEV MODE: Error sending document {generated_doc_path}: {send_doc_e}", exc_info=True)
+                await message.answer("⚠️ Не удалось отправить файл с отчетом.")
+        elif not generated_doc_paths:
+            pass
+        else:
+            logging.error(f"DEV MODE: Generated report file not found: {generated_doc_path}")
+            await message.answer("⚠️ Не удалось найти сгенерированный файл отчета.")
+
+        logging.info(f"DEV MODE: TXT processing completed for chat_id {chat_id}")
+        await state.clear()
+
+    except Exception as e:
+        logging.error(f"CRITICAL ERROR in handle_dev_transcript_txt for chat_id {chat_id}: {e}", exc_info=True)
+        await message.answer("❌ Произошла непредвиденная ошибка в DEV режиме.")
+        await state.clear()
+    finally:
+        if temp_txt_path and os.path.exists(temp_txt_path):
+            try:
+                await asyncio.to_thread(os.remove, temp_txt_path)
+                logging.info(f"DEV MODE: Cleaned up temp TXT file: {temp_txt_path}")
+            except OSError as e:
+                logging.error(f"DEV MODE: Error deleting temp TXT file {temp_txt_path}: {e}", exc_info=True)
+
+# --- Обработчик неизвестных сообщений ---
+@common_router.message()
+async def handle_unknown(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    logging.debug(f"Received unknown message type '{message.content_type}' from chat_id {message.chat.id} in state {current_state}")
+    
+    if current_state == LectureRegistration.waiting_discipline:
+        await message.answer("Режим лекции: Введите название дисциплины или /reset.")
+    elif current_state == LectureRegistration.waiting_teacher:
+        await message.answer("Режим лекции: Введите ФИО преподавателя или /reset.")
+    elif current_state == LectureRegistration.waiting_datetime:
+        await message.answer(f"Режим лекции: Введите дату/время (ЧЧ:ММ-ДД.ММ.ГГГГ) или /reset.")
+    elif current_state == LectureRegistration.waiting_drive_link:
+        await message.answer("Режим лекции: Жду ссылку Google Drive или /reset.")
+    elif current_state == LectureRegistration.waiting_confirmation:
+        await message.answer("Пожалуйста, выберите 'Да' или 'Нет' на клавиатуре.")
+    elif current_state == LectureRegistration.waiting_confirmation_correction:
+        await message.answer("Пожалуйста, выберите 'Да' или 'Нет' на клавиатуре.")
+    elif current_state == DevProcessing.waiting_dev_discipline:
+        await message.answer("DEV Режим: Введите название дисциплины или /reset.")
+    elif current_state == DevProcessing.waiting_dev_teacher:
+        await message.answer("DEV Режим: Введите ФИО преподавателя или /reset.")
+    elif current_state == DevProcessing.waiting_dev_datetime:
+        await message.answer(f"DEV Режим: Введите дату/время или /reset.")
+    elif current_state == DevProcessing.waiting_transcript_txt:
+        await message.answer("DEV Режим: Жду TXT файл или /reset.")
+    else:
+        await message.answer("Неизвестная команда или состояние. Используйте /start или /dev_process_txt.")
+
+# --- Регистрация обработчиков ---
+async def register_aiogram_handlers(dp: Dispatcher, bot: Bot):
+    dp.include_router(registration_router)
+    dp.include_router(dev_router)
+    dp.include_router(common_router)
+    logging.info("All handlers registered")
