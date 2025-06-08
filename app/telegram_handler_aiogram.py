@@ -27,6 +27,7 @@ from pydub.exceptions import CouldntDecodeError
 common_router = Router(name="common_commands")
 registration_router = Router(name="lecture_registration_fsm")
 dev_router = Router(name="developer_tools")
+unknown_message_router = Router(name="uncnown_meaasge")
 
 # --- Клавиатуры ---
 confirmation_keyboard = ReplyKeyboardMarkup(
@@ -653,8 +654,8 @@ async def handle_dev_transcript_txt(message: Message, state: FSMContext, bot: Bo
             except OSError as e:
                 logging.error(f"DEV MODE: Error deleting temp TXT file {temp_txt_path}: {e}", exc_info=True)
 
-"""# --- Обработчик неизвестных сообщений ---
-'''@common_router.message()
+# --- Обработчик неизвестных сообщений ---
+@unknown_message_router.message()
 async def handle_unknown(message: Message, state: FSMContext):
     current_state = await state.get_state()
     logging.debug(f"Received unknown message type '{message.content_type}' from chat_id {message.chat.id} in state {current_state}")
@@ -669,7 +670,7 @@ async def handle_unknown(message: Message, state: FSMContext):
         await message.answer("Режим лекции: Жду ссылку Google Drive или /reset.")
     elif current_state == LectureRegistration.waiting_confirmation:
         await message.answer("Пожалуйста, выберите 'Да' или 'Нет' на клавиатуре.")
-    elif current_state == LectureRegistration.waiting_confirmation_correction:
+    elif current_state == LectureRegistration.waiting_correction_choice:
         await message.answer("Пожалуйста, выберите 'Да' или 'Нет' на клавиатуре.")
     elif current_state == DevProcessing.waiting_dev_discipline:
         await message.answer("DEV Режим: Введите название дисциплины или /reset.")
@@ -679,8 +680,14 @@ async def handle_unknown(message: Message, state: FSMContext):
         await message.answer(f"DEV Режим: Введите дату/время или /reset.")
     elif current_state == DevProcessing.waiting_transcript_txt:
         await message.answer("DEV Режим: Жду TXT файл или /reset.")
+    elif current_state == LectureRegistration.correcting_discipline:
+        await message.answer("Режим лекции: Введите название дисциплины или /reset.")
+    elif current_state == LectureRegistration.correcting_teacher:
+        await message.answer("Режим лекции: Введите ФИО преподавателя или /reset.")
+    elif current_state == LectureRegistration.correcting_datetime:
+        await message.answer(f"Режим лекции: Введите дату/время (ЧЧ:ММ-ДД.ММ.ГГГГ) или /reset.")
     else:
-        await message.answer("Неизвестная команда или состояние. Используйте /start или /dev_process_txt.")'''"""
+        await message.answer("Неизвестная команда или состояние. Используйте /start или /dev_process_txt.")
 
 # --- Регистрация обработчиков ---
 async def register_aiogram_handlers(dp: Dispatcher, bot: Bot):
@@ -690,5 +697,6 @@ async def register_aiogram_handlers(dp: Dispatcher, bot: Bot):
     
     # Затем обработчики состояний
     dp.include_router(registration_router)
+    dp.include_router(unknown_message_router)
     
     logging.info("All handlers registered")
