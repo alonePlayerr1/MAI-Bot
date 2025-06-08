@@ -45,6 +45,11 @@ class LectureRegistration(StatesGroup):
     waiting_teacher = State()
     waiting_datetime = State()
     waiting_drive_link = State()
+    waiting_confirmation = State()
+    waiting_correction_choice = State()
+    correcting_discipline = State()
+    correcting_teacher = State()
+    correcting_datetime = State()
 
 # ---> КЛАСС СОСТОЯНИЙ ДЛЯ РЕЖИМА РАЗРАБОТЧИКА <---
 class DevProcessing(StatesGroup):

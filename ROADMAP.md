@@ -15,6 +15,12 @@
 * [✅] Прием **ссылки** на Google Drive (`app/telegram_handler_aiogram.py`)
 * [✅] Валидация формата ссылки Google Drive (`app/telegram_handler_aiogram.py`)
 * [✅] Базовая обработка ошибок и улучшенная обратная связь с пользователем (статусы, эмодзи) (`app/telegram_handler_aiogram.py`)
+* [✅] Добавлена команда /retry для возврата к началу ввода данных (`app/telegram_handler_aiogram.py`, `config.py`)
+* [✅] Реагирование на команды /start, /reset, /retry, /help независимо от состояния процесса (`app/telegram_handler_aiogram.py`)
+* [✅] Подтверждение корректности введённых пользователем данных и возможность исправить некорректно введённые данные (`app/telegram_handler_aiogram.py`)
+* [✅] Подключён обработчик неизвестных сообщений (`app/telegram_handler_aiogram.py`)
+* [✅] Повышена дружелюбность интерфейса к пользователю (`app/telegram_handler_aiogram.py`)
+* [✅] Добавлена инструкция по загрузке файла на Google Drive и настройке доступа к нему по ссылке (`app/telegram_handler_aiogram.py`)
 
 ### 2. Работа с облаком (Google Cloud)
 * [✅] Аутентификация с Google Cloud через сервисный аккаунт
